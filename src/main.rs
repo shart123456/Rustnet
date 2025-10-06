@@ -6,6 +6,8 @@ use tokio::time::timeout;
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
 
+mod dig;
+
 #[derive(Parser)]
 #[command(name = "netool")]
 #[command(about = "Async network operations tool", long_about = None)]
@@ -47,6 +49,28 @@ enum Commands {
         #[arg(short = 'o', long, default_value = "10")]
         timeout: u64,
     },
+    /// Perform detailed DNS dig operations
+    Dig {
+        /// Domain to query
+        #[arg(short, long)]
+        domain: String,
+
+        /// Record type (A, AAAA, MX, NS, TXT, CNAME, SOA, PTR, SRV, CAA, ANY)
+        #[arg(short = 'r', long, default_value = "A")]
+        record_type: String,
+
+        /// Custom nameserver IP
+        #[arg(short = 'n', long)]
+        nameserver: Option<IpAddr>,
+
+        /// Short output format (answers only)
+        #[arg(short, long)]
+        short: bool,
+
+        /// Query all common record types
+        #[arg(short, long)]
+        all: bool,
+    },
 }
 
 #[tokio::main]
@@ -63,12 +87,15 @@ async fn main() {
         Commands::Get { target, timeout: timeout_secs } => {
             handle_get(target, timeout_secs).await;
         }
+        Commands::Dig { domain, record_type, nameserver, short, all } => {
+            handle_dig(domain, record_type, nameserver, short, all).await;
+        }
     }
 }
 
 async fn handle_dns(operation: String, target: String) {
     let targets = read_targets(&target);
-    
+
     let resolver = TokioAsyncResolver::tokio(
         ResolverConfig::default(),
         ResolverOpts::default(),
@@ -79,7 +106,7 @@ async fn handle_dns(operation: String, target: String) {
     for t in targets {
         let resolver = resolver.clone();
         let op = operation.clone();
-        
+
         let handle = tokio::spawn(async move {
             match op.as_str() {
                 "resolve" => dns_resolve(&resolver, &t).await,
@@ -87,7 +114,7 @@ async fn handle_dns(operation: String, target: String) {
                 _ => println!("Unknown operation: {}", op),
             }
         });
-        
+
         handles.push(handle);
     }
 
@@ -135,7 +162,7 @@ async fn handle_ping(target: String, count: u32) {
         let handle = tokio::spawn(async move {
             ping_target(&t, count).await;
         });
-        
+
         handles.push(handle);
     }
 
@@ -147,7 +174,7 @@ async fn handle_ping(target: String, count: u32) {
 async fn ping_target(target: &str, count: u32) {
     // Note: ICMP ping requires raw sockets (root/admin privileges)
     // This is a simplified TCP-based "ping" (connection test)
-    
+
     let ip = match target.parse::<IpAddr>() {
         Ok(ip) => ip,
         Err(_) => {
@@ -167,10 +194,10 @@ async fn ping_target(target: &str, count: u32) {
 
     for i in 0..count {
         let start = std::time::Instant::now();
-        
+
         // Test connection to common port (80)
         let addr = format!("{}:80", ip);
-        
+
         match timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(&addr)).await {
             Ok(Ok(_)) => {
                 let duration = start.elapsed();
@@ -185,7 +212,7 @@ async fn ping_target(target: &str, count: u32) {
                 println!("[-] {} -> Reply #{}: Timeout", ip, i + 1);
             }
         }
-        
+
         if i < count - 1 {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -210,7 +237,7 @@ async fn resolve_hostname(hostname: &str) -> Option<IpAddr> {
         ResolverConfig::default(),
         ResolverOpts::default(),
     );
-    
+
     match resolver.lookup_ip(hostname).await {
         Ok(response) => response.iter().next(),
         Err(_) => None,
@@ -228,11 +255,11 @@ async fn handle_get(target: String, timeout_secs: u64) {
 
     for url in targets {
         let client = client.clone();
-        
+
         let handle = tokio::spawn(async move {
             http_get(&client, &url).await;
         });
-        
+
         handles.push(handle);
     }
 
@@ -249,16 +276,16 @@ async fn http_get(client: &reqwest::Client, url: &str) {
     };
 
     let start = std::time::Instant::now();
-    
+
     match client.get(&url_formatted).send().await {
         Ok(response) => {
             let duration = start.elapsed();
             let status = response.status();
             let content_length = response.content_length().unwrap_or(0);
-            
-            println!("[+] {} -> Status: {}, Size: {} bytes, Time: {:?}", 
+
+            println!("[+] {} -> Status: {}, Size: {} bytes, Time: {:?}",
                      url_formatted, status, content_length, duration);
-            
+
             // Optionally print response headers
             // for (key, value) in response.headers() {
             //     println!("  {}: {:?}", key, value);
@@ -282,5 +309,61 @@ fn read_targets(target: &str) -> Vec<String> {
     } else {
         // Treat as single target
         vec![target.to_string()]
+    }
+}
+
+async fn handle_dig(domain: String, record_type: String, nameserver: Option<IpAddr>, short: bool, all: bool) {
+    if all {
+        // Query all common record types
+        match dig::dig_any(&domain, nameserver).await {
+            Ok(results) => {
+                for result in results {
+                    let options = dig::DigOptions {
+                        query_type: result.query_type,
+                        nameserver,
+                        show_stats: false,
+                        trace: false,
+                        short,
+                    };
+                    result.display(&options);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error performing ANY query: {}", e);
+            }
+        }
+    } else {
+        // Query specific record type
+        let rec_type = match dig::parse_record_type(&record_type) {
+            Some(rt) => rt,
+            None => {
+                eprintln!("Invalid record type: {}. Valid types: A, AAAA, MX, NS, TXT, CNAME, SOA, PTR, SRV, CAA, ANY", record_type);
+                return;
+            }
+        };
+
+        let options = dig::DigOptions {
+            query_type: rec_type,
+            nameserver,
+            show_stats: true,
+            trace: false,
+            short,
+        };
+
+        match dig::dig(&domain, options).await {
+            Ok(result) => {
+                let display_options = dig::DigOptions {
+                    query_type: rec_type,
+                    nameserver,
+                    show_stats: true,
+                    trace: false,
+                    short,
+                };
+                result.display(&display_options);
+            }
+            Err(e) => {
+                eprintln!("Error performing dig: {}", e);
+            }
+        }
     }
 }
