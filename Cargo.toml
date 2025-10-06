@@ -8,6 +8,7 @@ clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.40", features = ["full"] }
 trust-dns-resolver = "0.23"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+chrono = "0.4"
 
 [[bin]]
 name = "netool"
