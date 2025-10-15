@@ -7,6 +7,8 @@ use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
 
 mod dig;
+mod http;
+mod fuzz;
 
 #[derive(Parser)]
 #[command(name = "netool")]
@@ -71,6 +73,28 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    Rust {
+         /// Target URL
+        #[arg(short, long)]
+        url: String,
+
+        /// Wordlist file path (optional, uses built-in if not provided)
+        #[arg(short, long)]
+        wordlist: Option<String>,
+
+        /// Fuzzing mode: dir, subdomain
+        #[arg(short, long, default_value = "dir")]
+        mode: String,
+
+        /// Concurrent workers
+        #[arg(short, long, default_value = "50")]
+        concurrent: usize,
+
+        /// Filter by status codes (comma-separated)
+        #[arg(short = 's', long)]
+        status_filter: Option<String>,
+   },
+
 }
 
 #[tokio::main]
@@ -229,6 +253,65 @@ async fn ping_target(target: &str, count: u32) {
              count, success, ((count - success) as f64 / count as f64) * 100.0);
     if success > 0 {
         println!("Average time: {:?}", avg_time);
+    }
+}
+
+async fn handle_fuzz(
+    url: String,
+    wordlist_path: Option<String>,
+    mode: String,
+    concurrent: usize,
+    status_filter: Option<String>,
+) {
+    println!("[*] Loading wordlist...");
+    let wordlist = match fuzz::load_wordlist(wordlist_path.as_deref()) {
+        Ok(wl) => wl,
+        Err(e) => {
+            eprintln!("[-] Error loading wordlist: {}", e);
+            return;
+        }
+    };
+
+    println!("[*] Loaded {} words", wordlist.len());
+
+    let status_codes = status_filter.map(|s| {
+        s.split(',')
+            .filter_map(|code| code.trim().parse::<u16>().ok())
+            .collect()
+    });
+
+    let options = fuzz::FuzzOptions {
+        max_concurrent: concurrent,
+        status_filter: status_codes,
+        ..Default::default()
+    };
+
+    println!("[*] Starting fuzzing with {} workers...", concurrent);
+
+    let results = match mode.as_str() {
+        "dir" => fuzz::fuzz_directories(&url, wordlist, options).await,
+        "subdomain" => {
+            let domain = url.replace("https://", "").replace("http://", "");
+            fuzz::fuzz_subdomains(&domain, wordlist, options).await
+        }
+        _ => {
+            eprintln!("[-] Invalid mode. Use 'dir' or 'subdomain'");
+            return;
+        }
+    };
+
+    println!("\n[+] Found {} results:\n", results.len());
+    println!("{:<8} {:<12} {:<10} {}", "Status", "Size", "Time", "URL");
+    println!("{}", "=".repeat(80));
+
+    for result in results {
+        println!(
+            "{:<8} {:<12} {:<10} {}",
+            result.status_code,
+            result.content_length,
+            format!("{}ms", result.duration_ms),
+            result.url
+        );
     }
 }
 
