@@ -164,7 +164,7 @@ pub async fn dig(domain: &str, options: DigOptions) -> Result<DigResult, String>
                     },
                     Some(RData::CAA(caa)) => {
                         let value = match caa.value() {
-                            trust_dns_resolver::proto::rr::rdata::caa::Value::Issuer(issuer_critical, key_values) => {
+                            trust_dns_resolver::proto::rr::rdata::caa::Value::Issuer(_issuer_critical, key_values) => {
                                 if let Some(kv) = key_values.first() {
                                     format!("{}", kv)
                                 } else {
